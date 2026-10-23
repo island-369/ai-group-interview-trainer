@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 群面陪练 · M0 演示</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; max-width: 720px; margin: 24px auto; padding: 0 12px; background: #f7f7f8; }
+  h3 { margin-bottom: 4px; }
+  .sub { color: #888; font-size: 13px; margin-bottom: 12px; }
+  #log { height: 340px; overflow-y: auto; background: #fff; border: 1px solid #ddd; border-radius: 8px; padding: 12px; margin: 12px 0; }
+  .m { margin: 6px 0; padding: 8px 10px; border-radius: 8px; max-width: 82%; white-space: pre-wrap; }
+  .user { background: #dcedc8; margin-left: auto; }
+  .ai { background: #e3f2fd; }
+  .sys { color: #999; font-size: 12px; text-align: center; max-width: 100%; }
+  .bar { display: flex; gap: 8px; align-items: center; }
+  #text { flex: 1; padding: 9px; border: 1px solid #ccc; border-radius: 6px; }
+  button, select { padding: 8px 12px; border-radius: 6px; border: 1px solid #ccc; background: #fff; cursor: pointer; }
+</style>
+</head>
+<body>
+<h3>AI 群面陪练 · M0 演示</h3>
+<div class="sub">单 AI 人格候选人流式对话（正式多人群面在 M1 上线）</div>
+<div class="bar">
+  <select id="persona"></select>
+  <button id="reconn">切换重连</button>
+  <span id="status" class="sub">未连接</span>
+</div>
+<div id="log"></div>
+<div class="bar">
+  <input id="text" placeholder="输入发言，回车发送…">
+  <button id="send">发送</button>
+</div>
+<script>
+const log = document.getElementById('log'), statusEl = document.getElementById('status');
+let ws = null, cur = null, aiName = '';
+function add(cls, text) {
+  const d = document.createElement('div'); d.className = 'm ' + cls; d.textContent = text;
+  log.appendChild(d); log.scrollTop = log.scrollHeight; return d;
+}
+function connect() {
+  if (ws) { try { ws.close(); } catch (e) {} }
+  const id = document.getElementById('persona').value || 'c_001';
+  ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/demo/${id}`);
+  ws.onopen = () => statusEl.textContent = '已连接';
+  ws.onclose = () => statusEl.textContent = '已断开（可切换重连）';
+  ws.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === 'hello') { aiName = m.name; add('sys', `已连接人格：${m.name}（${m.archetype}｜provider: ${m.provider}）`); }
+    else if (m.type === 'speak_start') { cur = add('ai', `${aiName}：`); }
+    else if (m.type === 'speak_chunk') { cur.textContent += m.chunk; log.scrollTop = log.scrollHeight; }
+    else if (m.type === 'error') { add('sys', '错误：' + m.message); }
+  };
+}
+function send() {
+  const t = document.getElementById('text').value.trim();
+  if (!t || !ws || ws.readyState !== 1) return;
+  document.getElementById('text').value = '';
+  add('user', '你：' + t);
+  ws.send(JSON.stringify({ type: 'user_speak', text: t }));
+}
+document.getElementById('send').onclick = send;
+document.getElementById('text').onkeydown = (e) => { if (e.key === 'Enter') send(); };
+document.getElementById('reconn').onclick = connect;
+document.getElementById('persona').onchange = connect;
+fetch('/api/personas').then(r => r.json()).then(ps => {
+  const sel = document.getElementById('persona');
+  ps.forEach(p => {
+    const o = document.createElement('option'); o.value = p.id;
+    o.textContent = `${p.name}（${p.archetype}）`; sel.appendChild(o);
+  });
+  connect();
+});
+</script>
+</body>
+</html>

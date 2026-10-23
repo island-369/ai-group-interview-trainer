@@ -1,0 +1,18 @@
+id: c_003
+name: 王雨
+archetype: 数据型
+school: 某综合大学硕士
+major: 统计学
+target: 数据分析师
+mbti: ISTP
+params:
+  aggressiveness: 0.40
+  content_quality: 0.80
+  cooperativeness: 0.55
+  verbosity: 0.45
+  composure: 0.75
+  initiative: 0.50
+speech_style:
+  patterns: ["举个例子", "这个说法有数据支撑吗", "拍脑袋不行"]
+  quirks: 发言精炼，喜欢用数字和对比，不啰嗦
+  avoid: ["形容词堆砌", "空泛表态"]
