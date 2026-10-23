@@ -135,7 +135,7 @@ function onMsg(m) {
     document.querySelectorAll('.dot').forEach(d => d.classList.remove('on'));
   } else if (m.type === 'interviewer') { add('interviewer', m.text, '面试官'); }
   else if (m.type === 'system') { add('system', m.text); }
-  else if (m.type === 'error') { add('system', '⚠ ' + m.text); }
+  else if (m.type === 'error') { add('system', '⚠ ' + (m.text || m.message || '未知错误')); }
   else if (m.type === 'speak_start') { speakCtx = add(m.agent === 'user' ? 'user' : 'ai', '', m.name || ''); const d = document.getElementById('dot-' + m.agent_id); if (d) d.classList.add('on'); }
   else if (m.type === 'speak_chunk') { speakCtx.textContent += m.chunk; $('log').scrollTop = 1e9; }
   else if (m.type === 'speak_end') { if (speakCtx) speakCtx.textContent = m.text || speakCtx.textContent; speakCtx = null; document.querySelectorAll('.dot').forEach(d => d.classList.remove('on')); }

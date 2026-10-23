@@ -229,7 +229,7 @@ async def ws_session(ws: WebSocket, session_id: str):
             try:
                 Incoming.model_validate(raw)
             except ValidationError:
-                await ws.send_json(out(type="error", message="无法解析的消息"))
+                await ws.send_json(out(type="error", text="无法解析的消息"))
                 continue
             await rt.handle_user(raw)
     except WebSocketDisconnect:
