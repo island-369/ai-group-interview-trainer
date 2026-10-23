@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 群面陪练 · 对局室</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; background: #f4f5f7; margin: 0; }
+  .wrap { max-width: 980px; margin: 0 auto; padding: 16px; }
+  h3 { margin: 8px 0; }
+  .card { background: #fff; border: 1px solid #e2e2e6; border-radius: 10px; padding: 16px; margin: 12px 0; }
+  select, input, button { padding: 8px 10px; border: 1px solid #ccc; border-radius: 6px; font-size: 14px; }
+  button { cursor: pointer; background: #fff; }
+  button.primary { background: #1667ff; color: #fff; border-color: #1667ff; }
+  button.ghost { background: #f2f3f5; }
+  .hidden { display: none !important; }
+  .grid { display: grid; grid-template-columns: 1fr 210px; gap: 12px; }
+  #bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .phase-chip { padding: 3px 10px; border-radius: 999px; font-size: 12px; background: #eee; color: #666; }
+  .phase-chip.on { background: #1667ff; color: #fff; }
+  .phase-chip.done { background: #d3f0d8; color: #1a7f37; }
+  #timer { margin-left: auto; font-variant-numeric: tabular-nums; color: #555; }
+  #log { height: 420px; overflow-y: auto; padding: 12px; background: #fff; border: 1px solid #e2e2e6; border-radius: 10px; }
+  .m { margin: 7px 0; padding: 8px 11px; border-radius: 9px; max-width: 78%; font-size: 14px; line-height: 1.5; }
+  .user { background: #dcedc8; margin-left: auto; }
+  .ai { background: #e8f1ff; }
+  .who { font-size: 11px; color: #888; margin-bottom: 2px; }
+  .interviewer { background: #f6f0e4; max-width: 92%; color: #5a4a21; }
+  .system { color: #999; font-size: 12px; text-align: center; max-width: 100%; }
+  #members { background: #fff; border: 1px solid #e2e2e6; border-radius: 10px; padding: 10px; font-size: 13px; }
+  .member { display: flex; justify-content: space-between; padding: 5px 4px; border-bottom: 1px dashed #eee; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #ccc; display: inline-block; margin-right: 6px; }
+  .dot.on { background: #22c55e; animation: pulse 1s infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  #inputbar { display: flex; gap: 8px; margin-top: 10px; }
+  #text { flex: 1; }
+  #ctx { display: flex; gap: 8px; margin-top: 8px; }
+  .tag { font-size: 11px; color: #666; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h3>AI 群面陪练 · 对局室 <span class="tag" id="mode"></span></h3>
+
+  <div class="card" id="setup">
+    <div style="display:flex; gap:10px; flex-wrap:wrap; align-items:center;">
+      <label>题目 <select id="q"></select></label>
+      <label>难度 <select id="diff"></select></label>
+      <label>节奏
+        <select id="pace">
+          <option value="normal">正常（约30分钟）</option>
+          <option value="fast">快速体验（约3分钟）</option>
+        </select>
+      </label>
+      <button class="primary" id="create">创建对局</button>
+    </div>
+  </div>
+
+  <div class="hidden" id="room">
+    <div class="card" id="bar">
+      <span id="phases"></span>
+      <span id="timer"></span>
+    </div>
+    <div class="grid">
+      <div>
+        <div id="log"></div>
+        <div id="inputbar">
+          <input id="text" placeholder="输入发言，回车发送…">
+          <button class="primary" id="send">发送</button>
+        </div>
+        <div id="ctx">
+          <button class="ghost hidden" id="ready">我准备好了</button>
+          <button class="ghost hidden" id="skip">提前完成阅读</button>
+          <button class="ghost hidden" id="apply">举手申请做总结</button>
+          <a class="hidden" id="reportLink" href="#" target="_blank">查看复盘报告 →</a>
+        </div>
+      </div>
+      <div id="members"></div>
+    </div>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const PHASES = [["BRIEFING","宣题"],["READING","阅读"],["OPENING","个人陈述"],["DISCUSSION","自由讨论"],["SUMMARY","总结陈词"]];
+let ws = null, sid = null, phaseElapsed = 0, timerInt = null, typingAt = 0;
+const anon = localStorage.getItem('gi_anon') || (t => (localStorage.setItem('gi_anon', t), t))(crypto.randomUUID());
+
+function add(cls, html, who) {
+  const d = document.createElement('div'); d.className = 'm ' + cls;
+  if (who) { const w = document.createElement('div'); w.className = 'who'; w.textContent = who; d.appendChild(w); }
+  const s = document.createElement('span'); d.appendChild(s);
+  if (typeof html === 'string') s.textContent = html; else s.appendChild(html);
+  $('log').appendChild(d); $('log').scrollTop = 1e9; return s;
+}
+const dur = pace => pace === 'fast'
+  ? { briefing: 6, reading: 15, opening_per: 30, discussion: 150, summary_solicit: 20, summary_speech: 90, closing: 3, director_gap: [0.6, 1.4] }
+  : {};
+
+function renderPhases(cur) {
+  let i = PHASES.findIndex(p => p[0] === cur), html = '';
+  PHASES.forEach((p, idx) => html += `<span class="phase-chip ${idx < i ? 'done' : idx === i ? 'on' : ''}">${p[1]}</span>`);
+  $('phases').innerHTML = html;
+}
+function showCtx(cur) {
+  $('ready').classList.toggle('hidden', cur !== 'INIT');
+  $('skip').classList.toggle('hidden', cur !== 'READING');
+  $('apply').classList.toggle('hidden', !(cur === 'SUMMARY' && !$('apply').disabled));
+}
+function send(t, text) { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: t, text })); }
+
+$('create').onclick = async () => {
+  const body = { question_id: $('q').value, difficulty: $('diff').value, durations: dur($('pace').value) };
+  const r = await fetch('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Anon-Token': anon }, body: JSON.stringify(body) });
+  if (!r.ok) { alert('创建失败：' + (await r.text())); return; }
+  const data = await r.json(); sid = data.session_id;
+  $('mode').textContent = data.difficulty + ' 档 · ' + (provider => 'provider: ' + provider)('') ;
+  $('setup').classList.add('hidden'); $('room').classList.remove('hidden');
+  connect();
+};
+function connect() {
+  ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/session/${sid}`);
+  ws.onmessage = e => onMsg(JSON.parse(e.data));
+  ws.onopen = () => $('mode').textContent += '';
+}
+let speakCtx = null;
+function onMsg(m) {
+  if (m.type === 'snapshot') {
+    $('members').innerHTML = m.members.map(x =>
+      `<div class="member"><span><span class="dot" id="dot-${x.id}"></span>${x.name}${x.archetype ? '·' + x.archetype : ''}</span><span class="tag">${x.role === 'user' ? '你' : x.role === 'interviewer' ? '面试官' : 'AI'}</span></div>`).join('');
+    m.transcript.forEach(t => add('system', t.name + '：' + t.text));
+    renderPhases(m.phase); showCtx(m.phase);
+    startTimer();
+  } else if (m.type === 'phase') {
+    phaseElapsed = 0; renderPhases(m.phase); showCtx(m.phase); add('system', `—— ${m.phase_label} ——`);
+    document.querySelectorAll('.dot').forEach(d => d.classList.remove('on'));
+  } else if (m.type === 'interviewer') { add('interviewer', m.text, '面试官'); }
+  else if (m.type === 'system') { add('system', m.text); }
+  else if (m.type === 'error') { add('system', '⚠ ' + m.text); }
+  else if (m.type === 'speak_start') { speakCtx = add(m.agent === 'user' ? 'user' : 'ai', '', m.name || ''); const d = document.getElementById('dot-' + m.agent_id); if (d) d.classList.add('on'); }
+  else if (m.type === 'speak_chunk') { speakCtx.textContent += m.chunk; $('log').scrollTop = 1e9; }
+  else if (m.type === 'speak_end') { if (speakCtx) speakCtx.textContent = m.text || speakCtx.textContent; speakCtx = null; document.querySelectorAll('.dot').forEach(d => d.classList.remove('on')); }
+  else if (m.type === 'review_ready') { $('reportLink').href = '/report.html?session_id=' + sid; $('reportLink').classList.remove('hidden'); add('system', '复盘报告已生成'); }
+}
+function startTimer() {
+  clearInterval(timerInt); phaseElapsed = 0;
+  timerInt = setInterval(() => { phaseElapsed++; $('timer').textContent = '本阶段 ' + fmt(phaseElapsed); }, 1000);
+}
+const fmt = s => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+
+$('ready').onclick = () => send('user_ready');
+$('skip').onclick = () => send('user_skip');
+$('apply').onclick = () => { send('summary_apply'); $('apply').disabled = true; };
+function doSend() { const t = $('text').value.trim(); if (!t) return; $('text').value = ''; send('user_speak', t); add('user', t, '你'); }
+$('send').onclick = doSend;
+$('text').onkeydown = e => { if (e.key === 'Enter') doSend(); };
+$('text').oninput = () => { const now = Date.now(); if (now - typingAt > 1500 && ws && ws.readyState === 1) { typingAt = now; ws.send(JSON.stringify({ type: 'user_typing' })); } };
+
+(async () => {
+  const qs = await (await fetch('/api/questions')).json();
+  $('q').innerHTML = qs.map(q => `<option value="${q.id}">[${q.industry}·难度${q.difficulty}] ${q.title}</option>`).join('');
+  const ds = await (await fetch('/api/difficulty')).json();
+  $('diff').innerHTML = ds.map(d => `<option value="${d.key}">${d.label} — ${d.description}</option>`).join('');
+})();
+</script>
+</body>
+</html>

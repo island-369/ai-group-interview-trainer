@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI 群面陪练 · 复盘报告</title>
+<style>
+  body { font-family: system-ui, -apple-system, sans-serif; background: #f4f5f7; margin: 0; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 20px 16px; }
+  .card { background: #fff; border: 1px solid #e2e2e6; border-radius: 10px; padding: 18px; margin: 14px 0; }
+  h3 { margin: 6px 0 14px; }
+  .kpi { display: flex; gap: 26px; align-items: baseline; flex-wrap: wrap; }
+  .kpi b { font-size: 34px; color: #1667ff; }
+  .kpi .sub { color: #777; font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  td, th { padding: 8px 6px; border-bottom: 1px solid #eee; text-align: left; vertical-align: top; }
+  .quote { border-left: 3px solid #ccc; padding: 2px 8px; margin: 4px 0; color: #444; font-size: 13px; background: #fafafa; }
+  .quote.positive { border-color: #22c55e; }
+  .quote.negative { border-color: #ef4444; }
+  ul { margin: 6px 0; padding-left: 20px; }
+  .pill { display: inline-block; padding: 2px 10px; border-radius: 999px; background: #eef3ff; color: #235; font-size: 13px; margin: 2px; }
+  .tag { font-size: 12px; color: #999; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h3 id="title">复盘报告</h3>
+  <div class="card" id="body"><p class="tag">加载中…</p></div>
+  <div class="card"><h3>维度详情与证据</h3><div id="dims"></div></div>
+  <div class="card"><h3>改进动作</h3><ul id="actions"></ul></div>
+</div>
+<script>
+const sid = new URLSearchParams(location.search).get('session_id');
+const $ = id => document.getElementById(id);
+
+function radarSVG(radar, labels) {
+  const keys = Object.keys(radar), n = keys.length, cx = 160, cy = 150, R = 105;
+  const pt = (i, r) => { const a = -Math.PI / 2 + i * 2 * Math.PI / n; return [cx + r * Math.cos(a), cy + r * Math.sin(a)]; };
+  let s = '';
+  for (let ring = 1; ring <= 5; ring++) {
+    s += `<polygon points="${keys.map((_, i) => pt(i, R * ring / 5).join(',')).join(' ')}" fill="none" stroke="#e5e7eb"/>`;
+  }
+  keys.forEach((k, i) => { const [x, y] = pt(i, R); s += `<line x1="${cx}" y1="${cy}" x2="${x}" y2="${y}" stroke="#e5e7eb"/>`; });
+  s += `<polygon points="${keys.map((k, i) => pt(i, R * radar[k] / 5).join(',')).join(' ')}" fill="rgba(22,103,255,.25)" stroke="#1667ff" stroke-width="2"/>`;
+  keys.forEach((k, i) => { const [x, y] = pt(i, R + 22); s += `<text x="${x}" y="${y}" font-size="11" text-anchor="middle" fill="#555">${(labels[k] || k)} ${radar[k]}</text>`; });
+  return `<svg width="320" height="300" viewBox="0 0 320 300">${s}</svg>`;
+}
+
+async function load() {
+  if (!sid) { $('body').textContent = '缺少 session_id'; return; }
+  for (let i = 0; i < 60; i++) {
+    const r = await fetch(`/api/sessions/${sid}/report`);
+    if (r.status === 200) { render(await r.json()); return; }
+    $('body').innerHTML = '<p class="tag">报告生成中，稍候…</p>';
+    await new Promise(res => setTimeout(res, 2000));
+  }
+  $('body').innerHTML = '<p class="tag">报告尚未生成（对局可能未结束）</p>';
+}
+function render(d) {
+  const labels = {}; d.dimensions.forEach(x => labels[x.key] = x.label);
+  $('title').textContent = `复盘报告 · ${d.question_id}`;
+  $('body').innerHTML = `
+    <div class="kpi">
+      <div><b>${d.overall}</b><div class="sub">总分（5 分制）</div></div>
+      <div><b>${d.rank}/${d.total_members}</b><div class="sub">本场名次</div></div>
+      <div style="margin-left:auto" class="tag">评分方式：${d.note === 'llm' ? 'LLM 评估' : '启发式（mock）'}<br>
+      优势：${d.strengths.join('、')}<br>短板：${d.weaknesses.join('、')}</div>
+    </div>
+    <div style="display:flex;justify-content:center">${radarSVG(d.radar, labels)}</div>`;
+  $('dims').innerHTML = d.dimensions.map(x => `
+    <table><tr>
+      <th style="width:110px">${x.label}</th><th style="width:50px">${x.score} 分</th><td>${x.rationale}
+      ${(x.evidence || []).map(e => `<div class="quote ${e.sentiment || ''}">“${e.quote}” <span class="tag">${e.sentiment === 'positive' ? '加分' : e.sentiment === 'negative' ? '减分' : '中性'}</span></div>`).join('')}
+      </td></tr></table>`).join('');
+  $('actions').innerHTML = d.actions.map(a => `<li>${a}</li>`).join('');
+}
+load();
+</script>
+</body>
+</html>

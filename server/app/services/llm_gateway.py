@@ -5,6 +5,9 @@ M0 范围：stream + mock；重试/降级/熔断在 M1 接入（role 与 usage �
 """
 
 import asyncio
+import copy
+import json
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Literal
@@ -18,6 +21,24 @@ Message = dict  # {"role": "system|user|assistant", "content": str}
 
 class LLMGatewayError(RuntimeError):
     pass
+
+
+def _parse_json(content: str) -> dict:
+    """容错解析模型输出：剥离 ```json 围栏、截取首尾大括号。"""
+    text = content.strip()
+    fence = re.search(r"```(?:json)?\s*(.+?)```", text, re.DOTALL)
+    if fence:
+        text = fence.group(1).strip()
+    start, end = text.find("{"), text.rfind("}")
+    if start >= 0 and end > start:
+        text = text[start : end + 1]
+    try:
+        obj = json.loads(text)
+    except json.JSONDecodeError as e:
+        raise LLMGatewayError(f"模型输出不是合法 JSON: {content[:120]}") from e
+    if not isinstance(obj, dict):
+        raise LLMGatewayError("模型输出应为 JSON 对象")
+    return obj
 
 
 @dataclass
@@ -50,6 +71,38 @@ class LLMGateway:
         async for chunk in self._real_stream(role, messages):
             self.usage.chars_out += len(chunk)
             yield chunk
+
+    async def complete_json(
+        self, role: Role, messages: list[Message], *, mock_obj: dict | None = None
+    ) -> dict:
+        """非流式结构化输出（评估管线用）；mock 模式直接返回 mock_obj 深拷贝。"""
+        self.usage.calls += 1
+        self.usage.chars_in += sum(len(m["content"]) for m in messages)
+        if self._s.resolved_provider == "mock":
+            if mock_obj is None:
+                raise LLMGatewayError("mock 模式必须提供 mock_obj")
+            out_obj = copy.deepcopy(mock_obj)
+            self.usage.chars_out += len(str(out_obj))
+            return out_obj
+        try:
+            import litellm
+        except ImportError as e:
+            raise LLMGatewayError("litellm 未安装：pip install litellm") from e
+        try:
+            resp = await litellm.acompletion(
+                model=f"openai/{self.model_for(role)}",
+                api_base=self._s.llm_api_base,
+                api_key=self._s.llm_api_key,
+                messages=messages,
+                temperature=0,
+            )
+            content = resp.choices[0].message.content or ""
+            self.usage.chars_out += len(content)
+            return _parse_json(content)
+        except LLMGatewayError:
+            raise
+        except Exception as e:  # 统一包装为网关错误
+            raise LLMGatewayError(f"LLM 调用失败: {e}") from e
 
     # ---------------------------------------------------------------- mock
     @staticmethod

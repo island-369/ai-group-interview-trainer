@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     llm_model_light: str = "glm-4-flash"
     session_token_budget: int = 400_000  # 单场 token 软预算，M1 接入熔断
 
+    db_path: str = str(BASE_DIR / "data" / "app.db")
+
     @property
     def resolved_provider(self) -> str:
         if self.llm_provider:
