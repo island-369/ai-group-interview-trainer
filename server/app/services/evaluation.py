@@ -5,6 +5,7 @@ mock 模式：启发式评分（基于行为统计），保证无密钥全流程
 AI 成员恒用启发式简化评分（01§7 Q2 决策：AI 参与排名、简化采样）。
 """
 
+import asyncio
 import re
 from dataclasses import dataclass
 
@@ -104,16 +105,20 @@ class Evaluator:
         user_stats = member_stats(messages, user.member_id, names)
         user_hs = heuristic_scores(user_stats)
 
-        dimensions, used_llm = [], False
-        for key, rubric in self.rubrics.items():
-            if self.gateway._s.resolved_provider != "mock":  # 真实路径：LLM 逐维度评分
-                dim, llm_ok = await self._llm_dimension(
-                    rubric, question, messages, name_of, user, fallback=user_hs[key]
-                )
-                used_llm = used_llm or llm_ok
-            else:
-                dim = self._dimension_from(rubric, user_hs[key], user_stats)
-            dimensions.append(dim)
+        used_llm = False
+        if self.gateway._s.resolved_provider != "mock":  # 真实路径：8 维度并发 LLM 评分
+            results = await asyncio.gather(*(
+                self._llm_dimension(rubric, question, messages, name_of, user,
+                                    fallback=user_hs[key])
+                for key, rubric in self.rubrics.items()
+            ))
+            dimensions = [dim for dim, _ in results]
+            used_llm = any(ok for _, ok in results)
+        else:
+            dimensions = [
+                self._dimension_from(rubric, user_hs[key], user_stats)
+                for key, rubric in self.rubrics.items()
+            ]
 
         overall = round(sum(d["score"] for d in dimensions) / len(dimensions), 2)
         # AI 简化评分与名次

@@ -207,15 +207,16 @@ class SessionRuntime:
 
     async def _agent_speak(self, m: Member, task) -> None:
         """流式输出一次 AI 发言；整段完整文本落库一次。"""
-        self.emit("speak_start", agent_id=m.id, name=m.name, archetype=m.persona.archetype, persist=False)
+        self.emit("speak_start", speaker=m, agent_id=m.id,
+                  name=m.name, archetype=m.persona.archetype, persist=False)
         buf = []
         async for chunk in task:
             buf.append(chunk)
-            self.emit("speak_chunk", agent_id=m.id, chunk=chunk, persist=False)
+            self.emit("speak_chunk", speaker=m, agent_id=m.id, chunk=chunk, persist=False)
         text = "".join(buf).strip() or "……"
         seq = self.store.append_message(self.id, "speak", text, speaker_id=m.id,
                                         meta={"phase": self.phase.value})
-        self.emit("speak_end", agent_id=m.id, name=m.name, text=text, seq=seq, persist=False)
+        self.emit("speak_end", speaker=m, agent_id=m.id, name=m.name, text=text, seq=seq, persist=False)
         self.transcript.append((m.name, text))
         self._last_speech_at = time.monotonic()
 
