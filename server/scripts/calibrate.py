@@ -43,6 +43,20 @@ def post(path: str, payload: dict) -> dict:
         return json.load(r)
 
 
+def fetch_json(url: str) -> tuple[int, dict | None]:
+    """同步 HTTP GET（供 asyncio.to_thread 调用）；4xx/5xx 返回状态码不抛异常。"""
+    try:
+        with urllib.request.urlopen(url, timeout=15) as r:
+            return r.status, json.load(r)
+    except urllib.error.HTTPError as e:
+        return e.code, None
+
+
+def save_result(out: str, payload: dict) -> None:
+    with open(out, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=1)
+
+
 async def main() -> None:
     created = post("/api/sessions", {
         "question_id": QUESTION, "difficulty": DIFFICULTY, "durations": DURATIONS})
@@ -104,21 +118,22 @@ async def main() -> None:
     print(f"\nreview_ready={review}  elapsed={time.monotonic()-t0:.0f}s  "
           f"user_turns={1+discuss_sent+(1 if summary_sent else 0)}", flush=True)
 
-    # 落盘转录与报告
-    with urllib.request.urlopen(f"{BASE}/api/sessions/{sid}/transcript", timeout=15) as r:
-        full = json.load(r)
+    # 落盘转录与报告（阻塞 IO 走线程池，避免阻塞事件循环）
+    status, full = await asyncio.to_thread(fetch_json, f"{BASE}/api/sessions/{sid}/transcript")
+    if status != 200 or full is None:
+        print("transcript 获取失败", flush=True)
+        return
+    report = None
     for _ in range(40):
-        with urllib.request.urlopen(f"{BASE}/api/sessions/{sid}/report", timeout=15) as r:
-            if r.status == 200:
-                report = json.load(r)
-                break
+        status, body = await asyncio.to_thread(fetch_json, f"{BASE}/api/sessions/{sid}/report")
+        if status == 200 and body is not None:
+            report = body
+            break
         await asyncio.sleep(3)
-    else:
-        report = None
 
     out = f"/tmp/gi_calibrate_{sid}.json"
-    with open(out, "w", encoding="utf-8") as f:
-        json.dump({"session_id": sid, "transcript": full, "report": report}, f, ensure_ascii=False, indent=1)
+    await asyncio.to_thread(
+        save_result, out, {"session_id": sid, "transcript": full, "report": report})
     print(f"saved: {out}", flush=True)
     if report:
         print(f"overall={report['overall']} rank={report['rank']}/{report['total_members']} "
