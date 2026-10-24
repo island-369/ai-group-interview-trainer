@@ -20,6 +20,15 @@ class Settings(BaseSettings):
 
     db_path: str = str(BASE_DIR / "data" / "app.db")
 
+    # 语音层（docs/06）：off 时不启用对应能力，语音端点返回错误、前端回退纯文字
+    voice_tts_provider: str = "edge"      # edge | off
+    voice_asr_provider: str = "local"     # local(sherpa-onnx) | off
+    voice_models_dir: str = str(BASE_DIR / "data" / "asr_models")
+
+    @property
+    def voices_file(self) -> Path:
+        return BASE_DIR / "configs" / "voices.yaml"
+
     @property
     def resolved_provider(self) -> str:
         if self.llm_provider:

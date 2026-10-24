@@ -7,7 +7,8 @@ from pydantic import BaseModel
 
 # 会话与 demo 共用的上行类型；对局语义由 SessionRuntime.handle_user 路由
 IncomingType = Literal[
-    "user_speak", "ping", "user_ready", "user_typing", "user_skip", "summary_apply"
+    "user_speak", "ping", "user_ready", "user_typing", "user_skip",
+    "summary_apply", "user_barge",
 ]
 
 

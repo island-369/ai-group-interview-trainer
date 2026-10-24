@@ -31,6 +31,7 @@ class PersonaCard(BaseModel):
     mbti: str = ""
     params: PersonaParams
     speech_style: SpeechStyle = SpeechStyle()
+    voice: dict | None = None  # 音色快照（resolver 按seed抽签后写入，docs/06§4）
 
     def scaled_by(self, preset: "DifficultyPreset") -> "PersonaCard":
         """按难度档位生成参数快照（不修改原卡；仅缩放激进度与内容质量）。"""

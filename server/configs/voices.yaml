@@ -1,0 +1,67 @@
+# 音色池（docs/06§4）：对局内固定、跨局按 seed 随机
+# provider_voice 为 edge-tts 音色名；tags 供人格原型过滤；base_* 为基准语速/音调
+interviewer_voices:   # 面试官：专业稳重的固定小池
+  - provider_voice: zh-CN-YunyeNeural
+    tags: [成熟, 男, 专业]
+    base_rate: "+0%"
+    base_pitch: "+0Hz"
+  - provider_voice: zh-CN-XiaohanNeural
+    tags: [成熟, 女, 专业]
+    base_rate: "+0%"
+    base_pitch: "+0Hz"
+
+candidate_voices:
+  # —— 果断/强势气质 ——
+  - provider_voice: zh-CN-YunxiNeural
+    tags: [年轻, 男, 果断]
+    base_rate: "+8%"
+    base_pitch: "+0Hz"
+  - provider_voice: zh-CN-YunjianNeural
+    tags: [年轻, 男, 果断, 沉稳]
+    base_rate: "+0%"
+    base_pitch: "-2Hz"
+  - provider_voice: zh-CN-liaoning-XiaobeiNeural
+    tags: [年轻, 女, 果断, 直爽]
+    base_rate: "+10%"
+    base_pitch: "+0Hz"
+  # —— 沉稳/理性气质 ——
+  - provider_voice: zh-CN-YunyangNeural
+    tags: [成熟, 男, 沉稳, 理性]
+    base_rate: "-4%"
+    base_pitch: "-2Hz"
+  - provider_voice: zh-CN-shaanxi-XiaoniNeural
+    tags: [年轻, 女, 沉稳]
+    base_rate: "+0%"
+    base_pitch: "+0Hz"
+  # —— 温和/亲和气质 ——
+  - provider_voice: zh-CN-XiaoxiaoNeural
+    tags: [年轻, 女, 温和]
+    base_rate: "+0%"
+    base_pitch: "+0Hz"
+  - provider_voice: zh-CN-XiaoyiNeural
+    tags: [年轻, 女, 温和, 活泼]
+    base_rate: "+4%"
+    base_pitch: "+2Hz"
+  - provider_voice: zh-CN-guangxi-XiaomingNeural
+    tags: [年轻, 男, 温和]
+    base_rate: "+0%"
+    base_pitch: "+0Hz"
+  # —— 随性/活络气质（搅局/活泼型） ——
+  - provider_voice: zh-CN-YunhaoNeural
+    tags: [年轻, 男, 随性]
+    base_rate: "+12%"
+    base_pitch: "+0Hz"
+  - provider_voice: zh-HK-HiuMaanNeural
+    tags: [年轻, 女, 随性]
+    base_rate: "+6%"
+    base_pitch: "+0Hz"
+
+# 人格原型 → 偏好的气质标签（按序优先，过滤音色池；空缺则全池可抽）
+archetype_voice_tags:
+  强势型: [果断, 沉稳]
+  框架型: [理性, 沉稳]
+  数据型: [理性, 沉稳]
+  附和型: [温和]
+  搅局型: [随性, 直爽]
+  沉默型: [温和, 沉稳]
+  老好人型: [温和]

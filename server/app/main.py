@@ -1,6 +1,8 @@
 """FastAPI 入口：REST + WS（demo 与对局会话，接口设计见 docs/02§6）。"""
 
 import asyncio
+import json
+import random
 import uuid
 from pathlib import Path
 from typing import Annotated
@@ -34,6 +36,20 @@ rubrics = load_rubrics(BASE_DIR / "configs" / "rubrics.yaml")
 Path(settings.db_path).parent.mkdir(parents=True, exist_ok=True)
 store = Store(settings.db_path)
 sessions: dict[str, SessionRuntime] = {}
+
+# ---- 语音层单例（docs/06）：模型缺失/关闭时自动降级为纯文字 ----
+from app.core.voice_bridge import VoiceBridge
+from app.services.voice.asr import LocalASR, int16_bytes_to_f32
+from app.services.voice.resolver import VoiceBook, VoiceResolver
+from app.services.voice.tts_edge import EdgeTTS
+from app.services.voice.vad import SileroVAD
+
+voice_book = VoiceBook.load(settings.voices_file)
+voice_resolver = VoiceResolver(voice_book)
+tts = EdgeTTS(settings)
+asr = LocalASR(settings.voice_models_dir)
+voice_ready = tts.enabled and settings.voice_asr_provider == "local" and asr.available
+voice_bridges: dict[str, VoiceBridge] = {}
 
 app = FastAPI(title="AI 群面陪练", version="0.2.0")
 
@@ -97,12 +113,19 @@ async def create_session(
     unknown = [p for p in persona_ids if p not in personas]
     if unknown:
         raise HTTPException(400, f"未知人格卡: {unknown}")
-    cards = [personas[p].scaled_by(preset) for p in persona_ids]  # 难度缩放快照
+    seed = int(payload.get("rng_seed") or uuid.uuid4().int >> 96)  # 音色/调度可复现
+    rng = random.Random(seed)
+    cards = []
+    for p in persona_ids:
+        card = personas[p].scaled_by(preset)  # 难度缩放快照
+        card = card.model_copy(update={"voice": voice_resolver.resolve_candidate(card, rng).model_dump()})
+        cards.append(card)
+    interviewer_voice = voice_resolver.resolve_interviewer(rng).model_dump()
 
     user_id, token = _user_id(x_anon_token)
     session_id = f"s_{uuid.uuid4().hex[:12]}"
     store.create_session(session_id, user_id, question.id, {
-        "difficulty": preset_key, "persona_ids": persona_ids,
+        "difficulty": preset_key, "persona_ids": persona_ids, "rng_seed": seed,
         "user_position": int(payload.get("user_position", 3)),
         "durations": payload.get("durations") or {},
     })
@@ -113,19 +136,21 @@ async def create_session(
 
     runtime = _build_runtime(session_id, question, preset_key, cards,
                              int(payload.get("user_position", 3)),
-                             PhasePlan.from_overrides(payload.get("durations")))
+                             PhasePlan.from_overrides(payload.get("durations")), seed)
+    runtime.interviewer_voice = interviewer_voice
     sessions[session_id] = runtime
     asyncio.create_task(runtime.run())
     resp = JSONResponse({
         "session_id": session_id, "question_id": question.id, "difficulty": preset_key,
         "ws_url": f"/ws/session/{session_id}",
+        "voice": {"enabled": voice_ready, "ws_url": f"/ws/voice/{session_id}"},
         "members": [{"id": c.id, "name": c.name, "archetype": c.archetype} for c in cards],
     })
     resp.headers["X-Anon-Token"] = token
     return resp
 
 
-def _build_runtime(session_id, question, preset_key, cards, user_position, plan) -> SessionRuntime:
+def _build_runtime(session_id, question, preset_key, cards, user_position, plan, seed=None) -> SessionRuntime:
     user = Member("user", "你", "user")
     interviewer = InterviewerAgent()
     candidates = []
@@ -134,7 +159,7 @@ def _build_runtime(session_id, question, preset_key, cards, user_position, plan)
                    agent=CandidateAgent(c, gateway), dyn=director.AgentDyn(c))
         candidates.append(m)
     cfg = SessionConfig(question=question, preset_key=preset_key, plan=plan,
-                        user_position=user_position)
+                        user_position=user_position, rng_seed=seed)
     return SessionRuntime(session_id, cfg, user, candidates, interviewer,
                           gateway, store, Evaluator(gateway, rubrics))
 
@@ -243,6 +268,81 @@ async def _drain(q: asyncio.Queue, ws: WebSocket) -> None:
     while True:
         msg = await q.get()
         await ws.send_json(msg)
+
+
+@app.websocket("/ws/voice/{session_id}")
+async def ws_voice(ws: WebSocket, session_id: str):
+    """语音通道：上行 16k PCM 分片 + 控制消息；下行 TTS 音频与状态（docs/06§2）。
+
+    半双工门控：AI 说话中（bridge.busy）服务端丢弃麦克分片，防回声误识别。
+    """
+    await ws.accept()
+    rt = sessions.get(session_id)
+    if rt is None:
+        await ws.send_json(out(type="error", text="对局不存在或已结束"))
+        await ws.close()
+        return
+    if not voice_ready:
+        await ws.send_json(out(type="error", text="语音未启用（缺少模型或 provider=off），请用文字模式"))
+        await ws.close()
+        return
+
+    old = voice_bridges.get(session_id)
+    if old:
+        old.detach()
+    bridge = VoiceBridge(rt, tts)
+    voice_bridges[session_id] = bridge
+    bridge.attach(ws.send_json, ws.send_bytes)
+    await ws.send_json(out(type="voice_hello", session=session_id))
+
+    vad = SileroVAD(settings.voice_models_dir)
+    seg_queue: asyncio.Queue = asyncio.Queue()
+
+    async def _asr_worker() -> None:
+        """ASR 与接收循环解耦：识别耗时 0.5s/段，若内联会灌满 ws 消息队列、
+        触发传输层暂停读（pong 也被暂停）→ 客户端 keepalive 超时。"""
+        while True:
+            seg = await seg_queue.get()
+            if seg is None:
+                return
+            text = await asyncio.to_thread(asr.transcribe, seg)
+            if text and len(text) >= 2:
+                await ws.send_json(out(type="heard", text=text))
+                await rt.handle_user({"type": "user_speak", "text": text})
+
+    worker = asyncio.create_task(_asr_worker())
+
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg["type"] == "websocket.disconnect":
+                break
+            if msg.get("bytes"):
+                # 半双工门控在客户端（按其播放队列闭麦，room.html micAllowed）；
+                # 服务端不按合成队列丢帧——合成进度落后于对局进度时帧会被误杀。
+                for seg in vad.feed(int16_bytes_to_f32(msg["bytes"])):
+                    seg_queue.put_nowait(seg)
+            elif msg.get("text"):
+                try:
+                    data = json.loads(msg["text"])
+                except json.JSONDecodeError:
+                    continue
+                t = data.get("type")
+                if t == "user_barge":
+                    bridge.barge()
+                    await rt.handle_user({"type": "user_barge"})
+                    await ws.send_json(out(type="barge"))
+                elif t == "voice_stop":
+                    for seg in vad.flush():
+                        seg_queue.put_nowait(seg)
+                elif t == "ping":
+                    await ws.send_json(out(type="pong"))
+    except WebSocketDisconnect:
+        pass
+    finally:
+        worker.cancel()
+        bridge.detach()
+        voice_bridges.pop(session_id, None)
 
 
 app.mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="static")

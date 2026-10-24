@@ -20,7 +20,7 @@ from app.services.personas import PersonaCard
 from app.services.question_bank import Question
 from app.services.store import Store
 
-PERSIST_KINDS = {"speak", "interviewer", "phase", "system", "summary"}
+PERSIST_KINDS = {"speak", "interviewer", "phase", "system", "summary", "interrupt"}
 
 
 @dataclass
@@ -79,6 +79,8 @@ class SessionRuntime:
         self._typing_until = 0.0
         self._forced_agent: str | None = None
         self._last_speech_at = time.monotonic()
+        self._active_speech: asyncio.Task | None = None  # 当前 AI 发言的生成任务（可被 user_barge 取消）
+        self.interviewer_voice: dict | None = None      # 面试官音色快照（docs/06§4）
         self.report: dict | None = None
 
     # ------------------------------------------------------------ 广播与订阅
@@ -136,6 +138,12 @@ class SessionRuntime:
             self._typing_until = time.monotonic() + 3.0
             return
         if t == "ping":
+            return
+        if t == "user_barge":
+            # 抢话：取消当前 AI 生成（_agent_speak 捕获后走打断收尾）
+            if self._active_speech and not self._active_speech.done():
+                self._active_speech.cancel()
+            self._typing_until = time.monotonic() + 1.0
             return
         text = (raw.get("text") or "").strip()
         if t == "user_skip" and self.phase is Phase.READING:
@@ -206,18 +214,40 @@ class SessionRuntime:
         self.emit("interviewer", speaker=m, text=text)
 
     async def _agent_speak(self, m: Member, task) -> None:
-        """流式输出一次 AI 发言；整段完整文本落库一次。"""
+        """流式输出一次 AI 发言；生成跑在可取消子任务里，被 user_barge 打断时
+        落库已生成的部分文本并广播 interrupt 事件（M2 打断协议接缝，docs/06§3）。"""
         self.emit("speak_start", speaker=m, agent_id=m.id,
                   name=m.name, archetype=m.persona.archetype, persist=False)
-        buf = []
-        async for chunk in task:
-            buf.append(chunk)
-            self.emit("speak_chunk", speaker=m, agent_id=m.id, chunk=chunk, persist=False)
+        buf: list[str] = []
+
+        async def _gen() -> None:
+            async for chunk in task:
+                buf.append(chunk)
+                self.emit("speak_chunk", speaker=m, agent_id=m.id, chunk=chunk, persist=False)
+
+        gen_task = asyncio.create_task(_gen())
+        self._active_speech = gen_task
+        try:
+            await gen_task
+        except asyncio.CancelledError:
+            partial = "".join(buf).strip()
+            if partial:
+                seq = self.store.append_message(self.id, "speak", partial + "（被打断）",
+                                                speaker_id=m.id, meta={"phase": self.phase.value})
+                self.emit("speak_end", speaker=m, agent_id=m.id, name=m.name,
+                          text=partial + "（被打断）", seq=seq, interrupted=True, persist=False)
+                self.transcript.append((m.name, partial))
+            self.emit("interrupt", by="user", target=m.id, name=m.name, persist=True)
+            m.dyn.provocation = min(1.0, m.dyn.provocation + 0.5)
+            self._active_speech = None
+            self._last_speech_at = time.monotonic()
+            return
         text = "".join(buf).strip() or "……"
         seq = self.store.append_message(self.id, "speak", text, speaker_id=m.id,
                                         meta={"phase": self.phase.value})
         self.emit("speak_end", speaker=m, agent_id=m.id, name=m.name, text=text, seq=seq, persist=False)
         self.transcript.append((m.name, text))
+        self._active_speech = None
         self._last_speech_at = time.monotonic()
 
     async def _briefing(self) -> None:
