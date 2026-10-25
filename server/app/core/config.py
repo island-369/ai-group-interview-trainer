@@ -9,7 +9,10 @@ BASE_DIR = Path(__file__).resolve().parents[2]  # server/
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # env_file 钉死为项目内绝对路径：uvicorn 从任何目录启动都读本项目的 .env，
+    # 不会误读其他项目（如 who-is-human）的同名文件
+    model_config = SettingsConfigDict(
+        env_file=str(BASE_DIR / ".env"), env_file_encoding="utf-8", extra="ignore")
 
     llm_provider: str = ""  # mock | openai-compatible；留空则按 api key 推断
     llm_api_base: str = "https://open.bigmodel.cn/api/paas/v4"
