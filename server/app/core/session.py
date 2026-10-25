@@ -15,7 +15,7 @@ from app.core import director
 from app.core.phases import PHASE_LABELS, Phase, PhasePlan
 from app.schemas.ws import out
 from app.services.evaluation import EvalMember, Evaluator
-from app.services.llm_gateway import LLMGateway
+from app.services.llm_gateway import LLMGateway, LLMGatewayError
 from app.services.personas import PersonaCard
 from app.services.question_bank import Question
 from app.services.store import Store
@@ -242,6 +242,12 @@ class SessionRuntime:
             self._active_speech = None
             self._last_speech_at = time.monotonic()
             return
+        except LLMGatewayError:
+            # LLM 失败（含重试后）：跳过本句而不是杀死整场对局
+            self.emit("system", text=f"（{m.name} 网络波动，这轮没说上话）")
+            self._active_speech = None
+            self._last_speech_at = time.monotonic()
+            return
         text = "".join(buf).strip() or "……"
         seq = self.store.append_message(self.id, "speak", text, speaker_id=m.id,
                                         meta={"phase": self.phase.value})
@@ -259,11 +265,16 @@ class SessionRuntime:
 
     async def _reading(self) -> None:
         self._set_phase(Phase.READING)
-        # AI 并行生成私密立场笔记（不外显；stance_note 为协程，直接 await）
+        # AI 并行生成私密立场笔记（不外显）；单个失败只影响该候选人的立场
         async def note(m: Member) -> None:
             if m.agent:
                 m.stance = await m.agent.stance_note(self.question)
-        await asyncio.gather(*(note(m) for m in self.candidates))
+
+        results = await asyncio.gather(*(note(m) for m in self.candidates),
+                                       return_exceptions=True)
+        for m, r in zip(self.candidates, results):
+            if isinstance(r, Exception):
+                m.stance = ""
         wait_skip = asyncio.create_task(self._skip_reading.wait())
         wait_time = asyncio.create_task(asyncio.sleep(self.plan.reading))
         done, _ = await asyncio.wait({wait_skip, wait_time}, return_when=asyncio.FIRST_COMPLETED)

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import random
 import uuid
 from pathlib import Path
@@ -27,6 +28,7 @@ from app.services.rubrics import load_rubrics
 from app.services.store import Store
 
 settings = get_settings()
+logger = logging.getLogger("gi.server")
 gateway = LLMGateway(settings)
 personas = load_personas(settings.personas_dir)
 difficulty_book = load_difficulty(settings.difficulty_file)
@@ -339,6 +341,9 @@ async def ws_voice(ws: WebSocket, session_id: str):
                     await ws.send_json(out(type="pong"))
     except WebSocketDisconnect:
         pass
+    except Exception:
+        logger.exception("voice ws 异常: session=%s", session_id)
+        raise
     finally:
         worker.cancel()
         bridge.detach()

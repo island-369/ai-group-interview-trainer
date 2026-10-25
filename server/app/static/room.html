@@ -121,6 +121,9 @@ $('create').onclick = async () => {
   const r = await fetch('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Anon-Token': anon }, body: JSON.stringify(body) });
   if (!r.ok) { alert('创建失败：' + (await r.text())); return; }
   const data = await r.json(); sid = data.session_id; voiceInfo = data.voice;
+  $('log').innerHTML = '';            // 清掉上一局的残留消息，避免"幽灵报错"
+  $('apply').disabled = false;
+  if (micOn) await voiceOff();        // 换局重置语音状态
   $('setup').classList.add('hidden'); $('room').classList.remove('hidden');
   $('mode').textContent = data.difficulty + ' 档';
   connect();
@@ -208,9 +211,10 @@ $('mic').onclick = async () => {
     audioCtx.createMediaStreamSource(mediaStream).connect(workletNode);
     vws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/voice/${sid}`);
     vws.binaryType = 'arraybuffer';
-    vws.onopen = () => { micOn = true; $('mic').textContent = '🎤 关闭语音'; $('barge').classList.remove('hidden'); voiceState('语音已开启（AI 说话时自动闭麦）'); };
+    vws.onopen = () => { micOn = true; $('mic').textContent = '🎤 关闭语音'; $('barge').classList.remove('hidden'); voiceState('语音已开启（AI 说话时自动闭麦，说话后停顿一秒即可）'); };
     vws.onmessage = onVoiceMsg;
-    vws.onclose = () => { if (micOn) { voiceState('语音连接已断开'); micOn = false; $('mic').textContent = '🎤 开启语音'; $('barge').classList.add('hidden'); } };
+    vws.onclose = (ev) => { micOn = false; $('mic').textContent = '🎤 开启语音'; $('barge').classList.add('hidden');
+      voiceState('语音已断开（code=' + ev.code + '）——请重新点击开启'); };
   } catch (e) { alert('语音初始化失败：' + e.message); }
 };
 async function voiceOff() {

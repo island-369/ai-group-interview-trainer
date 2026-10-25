@@ -59,7 +59,8 @@ class LLMGateway:
     async def stream(
         self, role: Role, messages: list[Message], *, mock_hint: str | None = None
     ) -> AsyncIterator[str]:
-        """流式生成；mock 模式下若调用方给出 mock_hint 则流式输出该文本。"""
+        """流式生成；真实模式下自动重试（429/5xx/网络/瞬态 401），未产出任何
+        内容前失败可安全重试，已产出部分内容则直接抛出避免重复拼接。"""
         self.usage.calls += 1
         self.usage.chars_in += sum(len(m["content"]) for m in messages)
         if self._s.resolved_provider == "mock":
@@ -68,9 +69,25 @@ class LLMGateway:
                 self.usage.chars_out += len(chunk)
                 yield chunk
             return
-        async for chunk in self._real_stream(role, messages):
-            self.usage.chars_out += len(chunk)
-            yield chunk
+
+        delay = 0.8
+        last_err: Exception | None = None
+        for attempt in range(3):
+            produced = False
+            try:
+                async for chunk in self._real_stream(role, messages):
+                    produced = True
+                    self.usage.chars_out += len(chunk)
+                    yield chunk
+                return
+            except LLMGatewayError as e:
+                last_err = e
+                if produced or attempt == 2:
+                    break
+                await asyncio.sleep(delay)
+                delay *= 2
+        raise LLMGatewayError(
+            f"LLM 调用失败（已重试3次，model={self._s.llm_model_strong}）: {last_err}") from last_err
 
     async def complete_json(
         self, role: Role, messages: list[Message], *, mock_obj: dict | None = None
