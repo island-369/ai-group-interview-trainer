@@ -80,6 +80,7 @@ class SessionRuntime:
         self._forced_agent: str | None = None
         self._last_speech_at = time.monotonic()
         self._active_speech: asyncio.Task | None = None  # 当前 AI 发言的生成任务（可被 user_barge 取消）
+        self._user_recording = False                    # 用户录音中：导演暂停调度 AI（docs/06§3 交互）
         self.interviewer_voice: dict | None = None      # 面试官音色快照（docs/06§4）
         self.report: dict | None = None
 
@@ -140,8 +141,8 @@ class SessionRuntime:
         if t == "ping":
             return
         if t == "user_barge":
-            # 抢话：取消当前 AI 生成（_agent_speak 捕获后走打断收尾）
-            if self._active_speech and not self._active_speech.done():
+            # 抢话只在自由讨论允许（陈述/总结阶段顺序发言，打断无意义）
+            if self.phase is Phase.DISCUSSION and self._active_speech and not self._active_speech.done():
                 self._active_speech.cancel()
             self._typing_until = time.monotonic() + 1.0
             return
@@ -180,6 +181,10 @@ class SessionRuntime:
             self.emit("error", text="当前无需发言（等待总结代表）", persist=False)
             return
         self.emit("error", text="当前阶段不支持发言", persist=False)
+
+    def set_user_recording(self, on: bool) -> None:
+        """用户点击说话/完成时由语音通道调用：录音中导演暂停调度 AI。"""
+        self._user_recording = on
 
     # ---------------------------------------------------------------- 主流程
     async def run(self) -> None:
@@ -328,6 +333,9 @@ class SessionRuntime:
             await asyncio.sleep(self.rng.uniform(*self.plan.director_gap))
             now = time.monotonic()
             if now < self._typing_until and now < deadline:  # 用户输入保护窗
+                continue
+            if self._user_recording:  # 用户录音中：AI 等他说完（docs/06§3）
+                self._last_speech_at = now
                 continue
             if not half_done and now >= half_at:
                 half_done = True

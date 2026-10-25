@@ -299,16 +299,27 @@ async def ws_voice(ws: WebSocket, session_id: str):
 
     vad = SileroVAD(settings.voice_models_dir)
     seg_queue: asyncio.Queue = asyncio.Queue()
+    # 点按说话模式（docs/06§3）：voice_start→录音累积，voice_stop→合并为一条发言提交
+    rec: dict = {"on": False, "texts": []}
 
     async def _asr_worker() -> None:
         """ASR 与接收循环解耦：识别耗时 0.5s/段，若内联会灌满 ws 消息队列、
-        触发传输层暂停读（pong 也被暂停）→ 客户端 keepalive 超时。"""
+        触发传输层暂停读（pong 也被暂停）→ 客户端 keepalive 超时。
+        队列元素：分段数组，或 Future（drain 哨兵，置结果表示在途分段已清空）。"""
         while True:
-            seg = await seg_queue.get()
-            if seg is None:
+            item = await seg_queue.get()
+            if item is None:
                 return
-            text = await asyncio.to_thread(asr.transcribe, seg)
-            if text and len(text) >= 2:
+            if isinstance(item, asyncio.Future):
+                item.set_result(None)
+                continue
+            text = await asyncio.to_thread(asr.transcribe, item)
+            if not text or len(text) < 2:
+                continue
+            if rec["on"]:
+                rec["texts"].append(text)
+                await ws.send_json(out(type="heard", text=text, preview=True))
+            else:
                 await ws.send_json(out(type="heard", text=text))
                 await rt.handle_user({"type": "user_speak", "text": text})
 
@@ -320,8 +331,6 @@ async def ws_voice(ws: WebSocket, session_id: str):
             if msg["type"] == "websocket.disconnect":
                 break
             if msg.get("bytes"):
-                # 半双工门控在客户端（按其播放队列闭麦，room.html micAllowed）；
-                # 服务端不按合成队列丢帧——合成进度落后于对局进度时帧会被误杀。
                 for seg in vad.feed(int16_bytes_to_f32(msg["bytes"])):
                     seg_queue.put_nowait(seg)
             elif msg.get("text"):
@@ -334,9 +343,23 @@ async def ws_voice(ws: WebSocket, session_id: str):
                     bridge.barge()
                     await rt.handle_user({"type": "user_barge"})
                     await ws.send_json(out(type="barge"))
+                elif t == "voice_start":
+                    rec["on"], rec["texts"] = True, []
+                    rt.set_user_recording(True)
+                    await ws.send_json(out(type="recording", on=True))
                 elif t == "voice_stop":
                     for seg in vad.flush():
                         seg_queue.put_nowait(seg)
+                    fut = asyncio.get_running_loop().create_future()
+                    seg_queue.put_nowait(fut)  # 哨兵：worker 处理完在途分段后置位
+                    await asyncio.wait_for(fut, timeout=15)
+                    rec["on"] = False
+                    rt.set_user_recording(False)
+                    text = "".join(rec["texts"]).strip()
+                    rec["texts"] = []
+                    await ws.send_json(out(type="recording", on=False))
+                    if text:
+                        await rt.handle_user({"type": "user_speak", "text": text})
                 elif t == "ping":
                     await ws.send_json(out(type="pong"))
     except WebSocketDisconnect:

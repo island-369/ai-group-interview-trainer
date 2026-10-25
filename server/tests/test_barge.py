@@ -6,7 +6,7 @@ from app.agents.candidate import CandidateAgent
 from app.agents.interviewer import InterviewerAgent
 from app.core import director
 from app.core.config import BASE_DIR
-from app.core.phases import PhasePlan
+from app.core.phases import Phase, PhasePlan
 from app.core.session import Member, SessionConfig, SessionRuntime
 from app.services.evaluation import Evaluator
 from app.services.rubrics import load_rubrics
@@ -41,6 +41,13 @@ async def test_barge_cancels_generation(tmp_path, mock_settings, personas, bank)
     task = asyncio.create_task(rt._agent_speak(m, m.agent.discuss(q, "", [], 1)))
     await asyncio.sleep(0.25)  # 已产出部分 chunk，但未讲完
 
+    # 抢话仅限讨论阶段：陈述阶段（此 runtime 处于 INIT）不得打断
+    rt.phase = Phase.OPENING
+    await rt.handle_user({"type": "user_barge"})
+    await asyncio.sleep(0.2)
+    assert not task.done(), "陈述阶段的 user_barge 不应打断 AI 发言"
+
+    rt.phase = Phase.DISCUSSION
     await rt.handle_user({"type": "user_barge"})
     await asyncio.wait_for(task, timeout=3)
 

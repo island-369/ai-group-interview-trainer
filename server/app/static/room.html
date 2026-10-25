@@ -70,7 +70,7 @@
           <input id="text" placeholder="输入发言，回车发送（语音模式下可混用）…">
           <button class="primary" id="send">发送</button>
           <button id="mic">🎤 开启语音</button>
-          <button class="danger hidden" id="barge">✋ 抢话（按住）</button>
+          <button class="ghost hidden" id="talk">🎙️ 说话（点击开始）</button>
         </div>
         <div id="ctx">
           <span id="voiceState" class="tag"></span>
@@ -89,8 +89,8 @@ const $ = id => document.getElementById(id);
 const PHASES = [["BRIEFING","宣题"],["READING","阅读"],["OPENING","个人陈述"],["DISCUSSION","自由讨论"],["SUMMARY","总结陈词"]];
 let ws = null, sid = null, phaseElapsed = 0, timerInt = null;
 let voiceInfo = null, vws = null, audioCtx = null, workletNode = null, mediaStream = null;
-let micOn = false, bargeHeld = false, pendingAudio = 0;
-let utterance = null, playQueue = [], playingSrc = null;
+let micOn = false, recording = false, curPhase = 'INIT';
+let utterance = null, playQueue = [], playingSrc = null, pendingAudio = 0;
 const anon = localStorage.getItem('gi_anon') || (t => (localStorage.setItem('gi_anon', t), t))(crypto.randomUUID());
 
 function add(cls, html, who) {
@@ -141,7 +141,7 @@ function onMsg(m) {
     m.transcript.forEach(t => add('system', t.name + '：' + t.text));
     renderPhases(m.phase); showCtx(m.phase); startTimer();
   } else if (m.type === 'phase') {
-    phaseElapsed = 0; renderPhases(m.phase); showCtx(m.phase); add('system', `—— ${m.phase_label} ——`);
+    phaseElapsed = 0; curPhase = m.phase; renderPhases(m.phase); showCtx(m.phase); add('system', `—— ${m.phase_label} ——`);
     document.querySelectorAll('.dot').forEach(d => d.classList.remove('on'));
   } else if (m.type === 'interviewer') { add('interviewer', m.text, '面试官'); }
   else if (m.type === 'system') { add('system', m.text); }
@@ -190,7 +190,6 @@ class P16k extends AudioWorkletProcessor {
 }
 registerProcessor('p16k', P16k);`;
 
-const micAllowed = () => micOn && (!aiBusy() || bargeHeld);
 const aiBusy = () => pendingAudio > 0 || playingSrc !== null || playQueue.length > 0;
 
 function voiceState(t) { $('voiceState').textContent = t || ''; }
@@ -207,22 +206,23 @@ $('mic').onclick = async () => {
     const url = URL.createObjectURL(new Blob([WORKLET], { type: 'application/javascript' }));
     await audioCtx.audioWorklet.addModule(url);
     workletNode = new AudioWorkletNode(audioCtx, 'p16k');
-    workletNode.port.onmessage = e => { if (vws && vws.readyState === 1 && micAllowed()) vws.send(e.data.buffer); };
+    workletNode.port.onmessage = e => { if (vws && vws.readyState === 1 && recording) vws.send(e.data.buffer); };
     audioCtx.createMediaStreamSource(mediaStream).connect(workletNode);
     vws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/voice/${sid}`);
     vws.binaryType = 'arraybuffer';
-    vws.onopen = () => { micOn = true; $('mic').textContent = '🎤 关闭语音'; $('barge').classList.remove('hidden'); voiceState('语音已开启（AI 说话时自动闭麦，说话后停顿一秒即可）'); };
+    vws.onopen = () => { micOn = true; $('mic').textContent = '🎤 关闭语音'; $('talk').classList.remove('hidden'); voiceState('语音已开启：点"说话"开始录音，说完再点一次发送'); };
     vws.onmessage = onVoiceMsg;
-    vws.onclose = (ev) => { micOn = false; $('mic').textContent = '🎤 开启语音'; $('barge').classList.add('hidden');
+    vws.onclose = (ev) => { micOn = false; $('mic').textContent = '🎤 开启语音'; $('talk').classList.add('hidden');
       voiceState('语音已断开（code=' + ev.code + '）——请重新点击开启'); };
   } catch (e) { alert('语音初始化失败：' + e.message); }
 };
 async function voiceOff() {
-  micOn = false;
+  micOn = false; recording = false;
   if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
   if (workletNode) { workletNode.disconnect(); workletNode = null; }
   if (vws) { vws.close(); vws = null; }
-  $('mic').textContent = '🎤 开启语音'; $('barge').classList.add('hidden');
+  $('mic').textContent = '🎤 开启语音'; $('talk').classList.add('hidden');
+  $('talk').textContent = '🎙️ 说话（点击开始）'; $('talk').classList.remove('danger');
   voiceState('');
 }
 function onVoiceMsg(e) {
@@ -234,8 +234,12 @@ function onVoiceMsg(e) {
     if (utterance && !m.aborted && utterance.parts.length) enqueuePlay(utterance);
     utterance = null;
   }
-  else if (m.type === 'heard') { add('user', m.text, '你'); voiceState('已识别，等待回应…'); }
-  else if (m.type === 'barge') { playQueue = []; stopPlaying(); voiceState('已抢话，请说'); }
+  else if (m.type === 'heard') {
+    if (m.preview) { voiceState('录音中，已听到：' + m.text.slice(-20)); }
+    else { add('user', m.text, '你'); voiceState('已识别，等待回应…'); }
+  }
+  else if (m.type === 'recording') { /* 状态由本地按钮管理 */ }
+  else if (m.type === 'barge') { playQueue = []; stopPlaying(); pendingAudio = 0; }
   else if (m.type === 'error') { voiceState('⚠ ' + m.text); }
 }
 function enqueuePlay(u) {
@@ -249,19 +253,34 @@ function pumpPlay() {
   const item = playQueue.shift();
   const src = audioCtx.createBufferSource();
   src.buffer = item.buf; src.connect(audioCtx.destination);
-  src.onended = () => { playingSrc = null; pumpPlay(); if (!aiBusy()) voiceState(micOn ? '轮到你说' : ''); };
+  src.onended = () => { playingSrc = null; pumpPlay(); if (!aiBusy()) voiceState('轮到你了，点"说话"开口'); };
   playingSrc = src; src.start();
 }
 function stopPlaying() { if (playingSrc) { try { playingSrc.onended = null; playingSrc.stop(); } catch (e) {} playingSrc = null; } }
 
-$('barge').onpointerdown = () => {
+// 点按说话：一下开始录音，再一下完成发送（讨论阶段AI说话时点击=自动抢话）
+$('talk').onclick = () => {
   if (!vws || vws.readyState !== 1) return;
-  bargeHeld = true;
-  playQueue = []; stopPlaying(); pendingAudio = 0;
-  vws.send(JSON.stringify({ type: 'user_barge' }));
-  voiceState('✋ 抢话中…');
+  if (!recording) {
+    if (aiBusy()) {
+      if (curPhase !== 'DISCUSSION') { voiceState('等对方说完（陈述/总结阶段不打断）'); return; }
+      playQueue = []; stopPlaying(); pendingAudio = 0;
+      vws.send(JSON.stringify({ type: 'user_barge' }));
+      voiceState('✋ 已抢话，直接开说');
+    }
+    recording = true;
+    vws.send(JSON.stringify({ type: 'voice_start' }));
+    $('talk').textContent = '🔴 说完了（点击发送）';
+    $('talk').classList.add('danger');
+    voiceState('录音中… 说完点一下发送');
+  } else {
+    recording = false;
+    vws.send(JSON.stringify({ type: 'voice_stop' }));
+    $('talk').textContent = '🎙️ 说话（点击开始）';
+    $('talk').classList.remove('danger');
+    voiceState('识别中…');
+  }
 };
-$('barge').onpointerup = $('barge').onpointerleave = () => { bargeHeld = false; };
 
 (async () => {
   const qs = await (await fetch('/api/questions')).json();
